@@ -1,0 +1,19 @@
+phenotype:
+  sample_sheet: "input_files/ID_use_case1_samples.tsv"
+  phenotype_columns:
+    - "example_phenotype"
+  covariate_columns:
+    - "age"
+  covariates_nPC: 10
+# potentially implement: binary vs. continous phenotypes
+
+genotype:
+  genotype_plink_prefix: "input_files/id_use_case1"
+  imp_prefix: "input_files/pop12_sub2."
+  imp_contigs:
+    - "ALL.uc1_only.AC"
+  imp_postfix: ".vcf.gz"
+  dosage_param: "GP-force"
+
+# cluster configuration
+medium_part: "medium"
