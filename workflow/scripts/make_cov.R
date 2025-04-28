@@ -11,8 +11,10 @@ cov_pcs_file=snakemake@input[["cov_pcs_file"]]
 cov_columns=snakemake@params[["cov_columns"]]
 covariates_nPC=snakemake@params[["covariates_nPC"]]
 cov_file=snakemake@output[["cov_file"]]
+fam_file=snakemake@input[["fam"]]
 
-
+fam <- read.table(fam_file, header = F)
+fid <- fam$V1
 sample_sheet<-read_tsv(sample_sheet_file)
 cov_pcs<-read.table(file=cov_pcs_file, 
                     col.names = c("FID", "IID", 
@@ -20,7 +22,7 @@ cov_pcs<-read.table(file=cov_pcs_file,
 
 cov=sample_sheet %>%
   select(sample, all_of(cov_columns))%>%
-  mutate(FID=sample, IID=sample)%>%
+  mutate(FID=fid, IID=sample)%>%
   left_join(cov_pcs %>% select(-FID), by="IID") %>%
   select(FID,IID, all_of(cov_columns), starts_with("PC") )
 

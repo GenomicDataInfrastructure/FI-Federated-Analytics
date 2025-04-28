@@ -1,196 +1,327 @@
 configfile: "config/config.yaml"
+singularity: "image/gwas_workflow.sif"
 
-#containerized: "docker://axschmidt/gwas_pipeline:0.1"
-singularity: "image/gwas_pipeline_alltools.sif"
 rule all:
-	input:
-		expand("results/regenie_association_merged/{phenotypes}.regenie.gz", phenotypes=config["phenotype"]["phenotype_columns"] ),
-		expand("results/regenie_association_merged_QC/{phenotypes}_LOG10P_manhattan.png", phenotypes=config["phenotype"]["phenotype_columns"] ),
+    input:
+        expand(
+            "results/{method}_association_merged/pop{popul}_{phenotypes}.{method}.gz",
+            method=config["method"],
+            popul=config["phenotype"]["populations"],
+            phenotypes=config["phenotype"]["phenotype_columns"],
+        ),
+        expand(
+            "results/{method}_association_QC/pop{popul}_{phenotypes}_LOG10P_manhattan.png",
+            method=config["method"],
+            popul=config["phenotype"]["populations"],
+            phenotypes=config["phenotype"]["phenotype_columns"],
+        )
 
-
-##### >>> file preparation #####
-
-rule prune_common:
-	input:
-		fam=config["genotype"]["genotype_plink_prefix"] + ".fam",
-		bim=config["genotype"]["genotype_plink_prefix"] + ".bim",
-		bed=config["genotype"]["genotype_plink_prefix"] + ".bed",
-	output:
-		pruned_variant_set="results/prune_common/prune_common.prune.in",
-	#resources: cpus=1, mem_mb=18000, time_job=720, partition=config["medium_part"],
-	params:		
-		out_prefix=lambda wildcards, output: output["pruned_variant_set"][:-9],
-	conda: "envs/plink.yaml"
-	shell:
-		"""
-		plink \
-		--bed {input.bed} \
-		--bim {input.bim} \
-		--fam {input.fam} \
-		--allow-extra-chr \
-		--chr 1-22 \
-		--indep-pairwise 1000 50 0.2 \
-		--keep-allele-order \
-		--maf 0.01 \
-		--out "{params.out_prefix}"
-		"""
-
-
-rule PCA_for_cov:
-	input:
-		fam=config["genotype"]["genotype_plink_prefix"] + ".fam",
-		bim=config["genotype"]["genotype_plink_prefix"] + ".bim",
-		bed=config["genotype"]["genotype_plink_prefix"] + ".bed",
-		pruned_variant_set="results/prune_common/prune_common.prune.in",
-	output:
-		eigenv="results/covar_PCA/common_vars.eigenvec"
-	#resources: cpus=1, mem_mb=18000, time_job=720, partition=config["medium_part"],
-	params:		
-		out_prefix=lambda wildcards, output: output["eigenv"][:-9],
-		covariates_nPC=config["phenotype"]["covariates_nPC"],
-	conda: "envs/plink.yaml"
-	shell:
-		"""
-		plink \
-		--bed {input.bed} \
-		--bim {input.bim} \
-		--fam {input.fam} \
-		--allow-extra-chr \
-		--extract {input.pruned_variant_set} \
-		--pca {params.covariates_nPC} \
-		--out "{params.out_prefix}"
-		"""
-
-
-rule make_regenie_pheno:
-	input:
-		sample_sheet_file=config["phenotype"]["sample_sheet"],
-	output:
-		pheno_file="results/pheno_cov/pheno.pheno",
-	params: 
-		pheno_columns=config["phenotype"]["phenotype_columns"],
-	conda: "envs/R_tidyverse.yaml"
-	#resources: cpus=1, mem_mb=5000, time_job=720, partition=config["medium_part"],
-	script: "scripts/make_pheno.R"
-
-
-rule make_regenie_cov:
-	input:
-		sample_sheet_file=config["phenotype"]["sample_sheet"],
-		cov_pcs_file="results/covar_PCA/common_vars.eigenvec",
-	output:
-		cov_file="results/pheno_cov/cov.cov",
-	params: 
-		cov_columns=config["phenotype"]["covariate_columns"],
-		covariates_nPC=config["phenotype"]["covariates_nPC"],
-	conda: "envs/R_tidyverse.yaml"
-	#resources: cpus=1, mem_mb=5000, time_job=720, partition=config["medium_part"],
-	script: "scripts/make_cov.R"
-
+################ file conversion and preparation #################################
 
 rule convert_imputed_vcf:
-	input:
-		imputed_vcf=config["genotype"]["imp_prefix"] + "{contig}" + config["genotype"]["imp_postfix"],
-		phenotype=config["phenotype"]["sample_sheet"],
-	output:
-		pgen="results/imp_converted/chr{contig}.pgen",
-		psam="results/imp_converted/chr{contig}.psam",
-		pvar="results/imp_converted/chr{contig}.pvar",
-	params:
-		plink_out=lambda wildcards, output: output["pgen"][:-5],
-		dosage_param=config["genotype"]["dosage_param"]
-	conda: "envs/plink2.yaml"
-	shell:
-		"""
-		plink2 \
-		--vcf {input.imputed_vcf} dosage={params.dosage_param} \
-		--split-par 'b38' \
-		--update-sex {input.phenotype} \
-		--double-id \
-		--make-pgen \
-		--max-alleles 2 \
-		--threads 8 \
-		--out {params.plink_out}
-		"""
+    input:
+        vcf=config["input_path"] + "chr{contig}.merged.annotated.vcf.gz",
+        phenotype=config["input_path"] + config["phenotype"]["sample_sheet"],
+        fam=config["input_path"] + "pop{popul}_pedigree.fam",
+    output:
+        pgen="results/imp_converted/pop{popul}_chr{contig}.pgen",
+        psam="results/imp_converted/pop{popul}_chr{contig}.psam",
+        pvar="results/imp_converted/pop{popul}_chr{contig}.pvar",
+    params:
+        plink_out=lambda wildcards, output: output["pgen"][:-5],
+        dosage_param=config["genotype"]["dosage_param"],
+    conda:
+        "envs/plink2.yaml"
+    benchmark:
+        "benchmarks/convert_imputed_vcf/pop{popul}_chr{contig}.txt"
+    threads: 5
+    shell:
+        """
+        plink2 \
+        --vcf {input.vcf} dosage={params.dosage_param} \
+        --split-par 'b38' \
+        --update-sex {input.phenotype} col-num=4 \
+        --set-all-var-ids @:#:\\$r,\\$a \
+        --new-id-max-allele-len 7500 missing \
+        --rm-dup 'force-first' 'list' \
+        --psam {input.fam} \
+        --double-id \
+        --write-snplist \
+        --make-pgen \
+        --max-alleles 2 \
+        --maf 0.0001 \
+        --threads {threads} \
+        --out {params.plink_out}
+        """
 
-##### <<< file preparation #####
+rule merge_plink:
+    input:
+        expand(
+            "results/imp_converted/pop{popul}_chr{contig}.{ext}",
+            contig=config["genotype"]["contigs"],
+            ext=["psam", "pvar", "pgen"],
+            allow_missing=True,
+        )
+    output:
+        psam="results/merged_plink/pop{popul}_merged.psam",
+        pvar="results/merged_plink/pop{popul}_merged.pvar",
+        pgen="results/merged_plink/pop{popul}_merged.pgen",
+	mergelist="results/merged_plink/pop{popul}_mergelist.txt",
+    params:
+        plink_out=lambda wildcards, output: output["pgen"][:-5],
+        plink_in=lambda wildcards, input: input[1][:-5],
+	chrs=" ".join(config["genotype"]["contigs"]),
+    conda:
+        "envs/plink2.yaml"
+    benchmark:
+        "benchmarks/merge_plink/pop{popul}_merged.txt"
+    shell:
+        """
+	: > {output.mergelist}
+	
+	for chr in {params.chrs}; do
+            echo "results/imp_converted/pop{wildcards.popul}_chr${{chr}}" >> {output.mergelist}
+        done
+	
+
+        if [ $(wc -l < {output.mergelist}) -gt 1 ]; then
+            plink2 \
+            --pmerge-list {output.mergelist} \
+            --indiv-sort 'none' \
+            --sort-vars \
+            --out {params.plink_out}
+        else
+            plink2 \
+            --pfile {params.plink_in} \
+            --make-pgen \
+            --out {params.plink_out}
+        fi
+        """
+
+rule prune:
+    input:
+        pgen="results/merged_plink/pop{popul}_merged.pgen",
+        psam="results/merged_plink/pop{popul}_merged.psam",
+        pvar="results/merged_plink/pop{popul}_merged.pvar",
+    output:
+        prune_in="results/prune/pop{popul}_merged.prune.in",
+    params:
+        plink_prefix=lambda wildcards, input: input["pgen"][:-5],
+        out=lambda wildcards, output: output["prune_in"][:-9],
+    conda:
+        "envs/plink2.yaml"
+    benchmark:
+        "benchmarks/prune/pop{popul}_pruned.txt"
+    shell:
+        """
+        plink2 \
+        --pfile {params.plink_prefix} \
+        --indep-pairwise 1000 50 0.2 \
+        --maf 0.05 \
+        --out {params.out}
+        """
+
+###################### PCA ###############################
+
+rule PCA_for_cov:
+    input:
+        psam="results/merged_plink/pop{popul}_merged.psam",
+        pvar="results/merged_plink/pop{popul}_merged.pvar",
+        pgen="results/merged_plink/pop{popul}_merged.pgen",
+        prune_in="results/prune/pop{popul}_merged.prune.in",
+    output:
+        eigenv="results/covar_PCA/pop{popul}_common_vars.eigenvec",
+    params:
+        out_prefix=lambda wildcards, output: output["eigenv"][:-9],
+        covariates_nPC=config["phenotype"]["covariates_nPC"],
+    conda:
+        "envs/plink2.yaml"
+    benchmark:
+        "benchmarks/PCA_for_cov/pop{popul}_pca.txt"
+    threads: 20
+    shell:
+        """
+        plink2 \
+        --pgen {input.pgen} \
+        --pvar {input.pvar} \
+        --psam {input.psam} \
+        --extract {input.prune_in} \
+        --allow-extra-chr \
+        --pca approx {params.covariates_nPC} \
+        --threads {threads} \
+        --out "{params.out_prefix}"
+        """
+
+################# File preparation #######################
+
+rule make_pheno:
+    input:
+        sample_sheet_file=config["input_path"] + config["phenotype"]["sample_sheet"],
+        fam=config["input_path"] + "pop{popul}_pedigree.fam",
+    output:
+        pheno_file="results/pheno_cov/pop{popul}_pheno.pheno",
+    params:
+        pheno_columns=config["phenotype"]["phenotype_columns"],
+    conda:
+        "envs/R_tidyverse.yaml"
+    benchmark:
+        "benchmarks/make_pheno/pop{popul}_pheno.txt"
+    resources:
+        cpus=1,
+        mem_mb=500,
+        time_job=720
+    script:
+        "scripts/make_pheno.R"
+
+rule make_cov:
+    input:
+        sample_sheet_file=config["input_path"] + config["phenotype"]["sample_sheet"],
+        cov_pcs_file="results/covar_PCA/pop{popul}_common_vars.eigenvec",
+        fam=config["input_path"] + "pop{popul}_pedigree.fam",
+    output:
+        cov_file="results/pheno_cov/pop{popul}_cov.cov",
+    params:
+        cov_columns=config["phenotype"]["covariate_columns"],
+        covariates_nPC=config["phenotype"]["covariates_nPC"],
+    conda:
+        "envs/R_tidyverse.yaml"
+    benchmark:
+        "benchmarks/make_cov/pop{popul}_cov.txt"
+    resources:
+        cpus=1,
+        mem_mb=500,
+        time_job=720
+    script:
+        "scripts/make_cov.R"
 
 
+################# REGENIE ##################################
 
 
+rule regenie_step1:
+    input:
+        cov="results/pheno_cov/pop{popul}_cov.cov",
+        pheno="results/pheno_cov/pop{popul}_pheno.pheno",
+        psam="results/merged_plink/pop{popul}_merged.psam",
+        pvar="results/merged_plink/pop{popul}_merged.pvar",
+        pgen="results/merged_plink/pop{popul}_merged.pgen",
+        prune_in="results/prune/pop{popul}_merged.prune.in",
+    output:
+        pred="results/regenie_association/pop{popul}_step1_pred.list",
+    params:
+        step1_out="results/regenie_association/pop{popul}_step1",
+        temp="results/regenie_association/level0_temp",
+        plink_in=lambda wildcards, input: input["pgen"][:-5],
+        type=config["phenotype"]["type"],
+    conda:
+        "envs/regenie.yaml"
+    benchmark:
+        "benchmarks/regenie_step1/pop{popul}_regenie_step1.txt"
+    threads: 20
+    shell:
+        """
+        regenie \
+        --step 1 \
+        --pgen {params.plink_in} \
+        --extract {input.prune_in} \
+        --covarFile {input.cov} \
+        --phenoFile {input.pheno} \
+        --bsize 1000 \
+        --threads {threads} \
+        --{params.type} \
+        --lowmem \
+        --lowmem-prefix {params.temp} \
+        --out {params.step1_out}
+        """
 
-##### >>> association analysis #####
+rule regenie_step2:
+    input:
+        pgen="results/imp_converted/pop{popul}_chr{contig}.pgen",
+        step1_out="results/regenie_association/pop{popul}_step1_pred.list",
+        cov="results/pheno_cov/pop{popul}_cov.cov",
+        pheno="results/pheno_cov/pop{popul}_pheno.pheno",
+    output:
+        step2=expand(
+            "results/regenie_association/pop{popul}_chr{contig}_{phenotypes}.regenie.gz",
+            phenotypes=config["phenotype"]["phenotype_columns"],
+            allow_missing=True,
+        )
+    params:
+        out_prefix="results/regenie_association/pop{popul}_chr{contig}",
+        pgen=lambda wildcards, input: input["pgen"][:-5],
+        type=config["phenotype"]["type"],
+    conda:
+        "envs/regenie.yaml"
+    benchmark:
+        "benchmarks/regenie_step2/pop{popul}_chr{contig}_regenie_step2.txt"
+    threads: 10
+    shell:
+        """
+        regenie \
+        --step 2 \
+        --pgen {params.pgen} \
+        --phenoFile {input.pheno} \
+        --covarFile {input.cov} \
+        --{params.type} \
+        --write-samples \
+        --gz \
+        --debug \
+        --spa \
+        --threads {threads} \
+        --pred {input.step1_out} \
+        --bsize 1000 \
+        --minMAC 1 \
+        --out {params.out_prefix}
+        """
 
-rule regenie_association:
-	input:
-		cov="results/pheno_cov/cov.cov",
-		pheno="results/pheno_cov/pheno.pheno",
-		step2_pgen="results/imp_converted/chr{contig}.pgen",
-	output:
-		step2_NQ2=expand("results/regenie_association/{contig}_{phenotypes}.regenie.gz", 
-			phenotypes=config["phenotype"]["phenotype_columns"],
-			allow_missing=True)
-	params:
-		out_prefix="results/regenie_association/{contig}",
-		plink_in=lambda wildcards, input: input["step2_pgen"][:-5],
-	conda: "envs/regenie.yaml"
-	shell:
-		"""
-		regenie \
-		--step 2 \
-		--pgen {params.plink_in} \
-		--phenoFile {input.pheno} \
-		--covarFile {input.cov} \
-		--bt \
-		--write-samples \
-		--gz \
-		--debug \
-		--ignore-pred \
-		--bsize 1000 \
-		--minMAC 10 \
-		--out {params.out_prefix}
-		"""
-		
-		
-rule merge_regenie_results:
-	input:
-		expand("results/regenie_association/{contig}_{phenotypes}.regenie.gz", contig=config["genotype"]["imp_contigs"], allow_missing=True), 
-	output:
-		merged_assoc="results/regenie_association_merged/{phenotypes}.regenie.gz",
-	params:
-		header="results/regenie_association_merged/header_{phenotypes}.txt"
-	conda: "envs/tabix.yaml"
-	shell:
-		"""
-		if zcat {input} | head -n1 > {params.header}
-		then
-		echo "error"
-		fi
-		
-		zcat {input} | grep -v "CHROM" | \
-		cat {params.header} - | \
-		bgzip > {output}
-		"""
+#################### Merge #######################################
 
-##### <<< association analysis #####
+rule merge_results:
+    input:
+        expand(
+            "results/regenie_association/pop{popul}_chr{contig}_{phenotypes}.regenie.gz",
+            contig=config["genotype"]["contigs"],
+            allow_missing=True,
+        )
+    output:
+        merged_assoc="results/regenie_association_merged/pop{popul}_{phenotypes}.regenie.gz",
+        merged_assoc_unzip="results/regenie_association_merged/pop{popul}_{phenotypes}.regenie",
+    params:
+        header="results/regenie_association_merged/header_{phenotypes}.txt",
+    conda:
+        "envs/tabix.yaml"
+    benchmark:
+        "benchmarks/merge_results/pop{popul}_{phenotypes}_merge.txt"
+    shell:
+        """
+	if zcat {input} | head -n1 > {params.header}
+	then
+	echo "error"
+	fi
 
+	zcat {input} | grep -v "CHR" | \
+	cat {params.header} - | \
+	bgzip > {output.merged_assoc}
 
+	gunzip -c {output.merged_assoc} > {output.merged_assoc_unzip}
+        """
 
-
-
-##### >>> QC of association results #####
+##################### QC (QQ + Manhattan) ########################
 
 rule generate_qq_plots:
-	input:
-		merged_assoc="results/regenie_association_merged/{phenotypes}.regenie.gz",
-	output:
-		out="results/regenie_association_merged_QC/{phenotypes}_LOG10P_manhattan.png"
-	resources: cpus=1, mem_mb=30000, time_job=720
-	params:
-		output_prefix=lambda wildcards, output: output["out"][:-21],
-		bp_col="GENPOS",
-		chr_col="CHROM",
-		pcols="LOG10P",
-	conda: "envs/R_qqplot.yaml"
-	script: "scripts/qqplot.R"
-##### <<< QC of association results #####
+    input:
+        merged_assoc="results/{method}_association_merged/pop{popul}_{phenotypes}.{method}",
+    output:
+        out="results/{method}_association_QC/pop{popul}_{phenotypes}_LOG10P_manhattan.png",
+    params:
+        output_prefix=lambda wildcards, output: output["out"][:-21],
+        phenotype=lambda wildcards: {wildcards.phenotypes},
+        method=lambda wildcards: {wildcards.method},
+    conda:
+        "envs/R_qqplot.yaml"
+    benchmark:
+        "benchmarks/generate_qq_plots/{method}_pop{popul}_{phenotypes}_qq_manhattan.txt"
+    threads: 20
+    script:
+        "scripts/manhattan_qq.R"
+
